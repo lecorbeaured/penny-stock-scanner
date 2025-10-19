@@ -91,11 +91,11 @@ DOGE-USD
 MATIC-USD
 DOT-USD
 AVAX-USD
-LINK-USD
-UNI-USD
-ATOM-USD
-LTC-USD
-SHIB-USD""",
+PEPE-USD
+BONK-USD
+WIF-USD
+FLOKI-USD
+MEME-USD""",
         "max_price": 5000.0,
         "price_range": (0.0001, 100000.0),
         "step": 100.0,
@@ -190,6 +190,45 @@ ITUB""",
         "step": 50.0,
         "description": "Global stocks (HK, India, Japan, Korea, Brazil)"
     }
+,
+"🎮 Gaming Stocks": {
+    "default": """TTWO
+EA
+ATVI
+RBLX
+U
+PLTK
+GMBL
+SKLZ
+DKNG
+PENN""",
+    "max_price": 200.0,
+    "price_range": (1.0, 500.0),
+    "step": 10.0,
+    "description": "Gaming, esports, and gambling stocks"
+}
+,
+"💰 Dividend Kings": {
+    "default": """JNJ
+PG
+KO
+PEP
+WMT
+MCD
+CVX
+XOM
+MMM
+CAT
+IBM
+T
+VZ
+ABT
+CL""",
+    "max_price": 500.0,
+    "price_range": (10.0, 1000.0),
+    "step": 50.0,
+    "description": "High-quality dividend aristocrats"
+}
 }
 
 # ===== SIDEBAR =====
@@ -275,10 +314,25 @@ scan_button = st.sidebar.button(
     help="Click to refresh data"
 )
 
+# Clear cache button
+if st.sidebar.button("🗑️ Clear Cache & Reset", use_container_width=True):
+    st.session_state.clear()
+    st.rerun()
+
 # Auto-refresh option
 auto_refresh = st.sidebar.checkbox("♻️ Auto-refresh (every 5 min)")
 
 st.sidebar.markdown("---")
+
+# ===== PRICE ALERTS =====
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔔 Price Alerts")
+
+alert_symbol = st.sidebar.text_input("Symbol to track", placeholder="BTC-USD")
+alert_price = st.sidebar.number_input("Alert when price reaches $", value=0.0)
+
+if alert_symbol and alert_price > 0:
+    st.sidebar.info(f"Alert set: {alert_symbol} @ ${alert_price}")
 
 # ===== INFO BOX =====
 st.sidebar.markdown(f"""
@@ -500,7 +554,7 @@ def scan_assets(symbols, max_price, max_from_low, min_rsi, max_rsi):
             continue
         
         # Rate limiting
-        time.sleep(0.3)
+        time.sleep(1.0)
     
     # Clean up progress
     progress_bar.empty()
@@ -657,6 +711,17 @@ if selected_asset in st.session_state.scan_data:
             use_container_width=True,
             hide_index=True
         )
+
+# ===== CHART VIEWER =====
+if st.checkbox("📈 Show Price Chart"):
+    chart_symbol = st.selectbox("Select symbol to chart", df['Symbol'].tolist())
+    
+    if chart_symbol:
+        stock = yf.Ticker(chart_symbol)
+        hist = stock.history(period="1y")
+        
+        st.line_chart(hist['Close'])
+        st.caption(f"{chart_symbol} - 1 Year Price History")
         
         # ===== DOWNLOAD SECTION =====
         st.markdown("---")
@@ -669,6 +734,20 @@ if selected_asset in st.session_state.scan_data:
             st.download_button(
                 label="📥 Download Full Results (CSV)",
                 data=csv,
+# Excel download
+            from io import BytesIO
+            
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                display_df.drop(['Alert Color'], axis=1).to_excel(writer, sheet_name='Scanner Results', index=False)
+            
+            st.download_button(
+                label="📊 Download Excel (.xlsx)",
+                data=output.getvalue(),
+                file_name=f"scanner_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
                 file_name=f"{selected_asset.lower().replace(' ', '_').replace('💎', '').replace('₿', '').replace('💱', '').replace('🥇', '').replace('📊', '').replace('🌏', '').strip()}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                 mime="text/csv",
                 use_container_width=True
@@ -754,6 +833,17 @@ else:
 if auto_refresh:
     time.sleep(300)  # 5 minutes
     st.rerun()
+# ===== EMAIL ALERTS =====
+if st.sidebar.checkbox("📧 Email Alerts (Beta)"):
+    email = st.sidebar.text_input("Your Email")
+    
+    if email and selected_asset in st.session_state.scan_data:
+        df = st.session_state.scan_data[selected_asset]
+        strong_buys = df[df['Alert'].str.contains('STRONG')]
+        
+        if not strong_buys.empty:
+            st.sidebar.success(f"🚨 {len(strong_buys)} strong buys found!")
+            st.sidebar.info("Email feature coming soon. For now, download the CSV.")
 
 # ===== FOOTER =====
 st.markdown("---")
