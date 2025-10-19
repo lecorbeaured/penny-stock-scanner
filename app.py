@@ -476,7 +476,7 @@ def export_watchlist_csv(watchlists: Dict) -> str:
     return df.to_csv(index=False)
 
 # ===== PORTFOLIO TRACKING =====
-def add_to_portfolio(symbol: str, quantity: float, entry_price: float, entry_date: str = None):
+def add_to_portfolio(symbol: str, quantity: float, entry_price: float, entry_date: str = None, exit_price: float = None):
     """Add holding to portfolio - NEW PHASE 2A"""
     if entry_date is None:
         entry_date = datetime.now().strftime('%Y-%m-%d')
@@ -485,12 +485,17 @@ def add_to_portfolio(symbol: str, quantity: float, entry_price: float, entry_dat
         'symbol': symbol,
         'quantity': quantity,
         'entry_price': entry_price,
+        'exit_price': exit_price if exit_price else None,
         'entry_date': entry_date,
-        'entry_value': quantity * entry_price
+        'entry_value': quantity * entry_price,
+        'exit_value': (quantity * exit_price) if exit_price else None
     }
     
     st.session_state.portfolio.append(holding)
-    st.success(f"✅ Added {quantity} shares of {symbol} at ${entry_price}")
+    if exit_price:
+        st.success(f"✅ Added {quantity} shares of {symbol} - Entry: ${entry_price}, Exit: ${exit_price}")
+    else:
+        st.success(f"✅ Added {quantity} shares of {symbol} at ${entry_price}")
 
 def calculate_portfolio_metrics(portfolio: List[Dict]) -> Dict:
     """Calculate portfolio P&L and metrics - NEW PHASE 2A"""
@@ -505,6 +510,7 @@ def calculate_portfolio_metrics(portfolio: List[Dict]) -> Dict:
     
     total_invested = sum(h['entry_value'] for h in portfolio)
     total_value = 0
+    total_exit_value = 0
     current_prices = {}
     
     for holding in portfolio:
@@ -512,10 +518,17 @@ def calculate_portfolio_metrics(portfolio: List[Dict]) -> Dict:
             ticker = yf.Ticker(holding['symbol'])
             current_price = ticker.info.get('currentPrice', 0)
             current_prices[holding['symbol']] = current_price
-            total_value += holding['quantity'] * current_price
+            
+            # If exit price is set, use that; otherwise use current price
+            if holding['exit_price']:
+                total_exit_value += holding['quantity'] * holding['exit_price']
+            else:
+                total_value += holding['quantity'] * current_price
         except:
             pass
     
+    # Total value is either exit value (if set) or current market value
+    total_value = total_exit_value if total_exit_value > 0 else total_value
     total_pl = total_value - total_invested
     total_pl_pct = (total_pl / total_invested * 100) if total_invested > 0 else 0
     
@@ -535,14 +548,20 @@ def format_portfolio_dataframe(portfolio: List[Dict], metrics: Dict) -> pd.DataF
     for holding in portfolio:
         symbol = holding['symbol']
         current_price = metrics['current_prices'].get(symbol, 0)
-        current_value = holding['quantity'] * current_price
+        entry_price = holding['entry_price']
+        exit_price = holding['exit_price']
+        
+        # Use exit price if set, otherwise use current price
+        price_to_use = exit_price if exit_price else current_price
+        current_value = holding['quantity'] * price_to_use
         pl = current_value - holding['entry_value']
         pl_pct = (pl / holding['entry_value'] * 100) if holding['entry_value'] > 0 else 0
         
         data.append({
             'Symbol': symbol,
             'Quantity': holding['quantity'],
-            'Entry Price': f"${holding['entry_price']:.2f}",
+            'Entry Price': f"${entry_price:.2f}",
+            'Exit Price': f"${exit_price:.2f}" if exit_price else "N/A",
             'Current Price': f"${current_price:.2f}",
             'Entry Value': f"${holding['entry_value']:.2f}",
             'Current Value': f"${current_value:.2f}",
@@ -771,10 +790,10 @@ def main():
         col_bt1, col_bt2 = st.columns(2)
         
         with col_bt1:
-            bt_symbol = st.text_input("Symbol to backtest", value="SPY")
+            bt_symbol = st.text_input("Symbol to backtest", value="SPY", key="backtest_symbol")
         
         with col_bt2:
-            bt_days = st.number_input("Days of history", value=365, min_value=30)
+            bt_days = st.number_input("Days of history", value=365, min_value=30, key="backtest_days")
         
         if st.button("▶️ Run Backtest", type="primary"):
             st.info("📌 Full backtesting engine (Phase 2B)")
@@ -798,12 +817,14 @@ def main():
         
         with col_port1:
             st.markdown("#### ➕ Add Holding")
-            port_symbol = st.text_input("Symbol", placeholder="AAPL")
-            port_qty = st.number_input("Quantity", value=1.0, min_value=0.01)
-            port_price = st.number_input("Entry Price", value=100.0, min_value=0.01)
+            port_symbol = st.text_input("Symbol", placeholder="AAPL", key="portfolio_symbol")
+            port_qty = st.number_input("Quantity", value=1.0, min_value=0.01, key="portfolio_qty")
+            port_price = st.number_input("Entry Price", value=100.0, min_value=0.01, key="portfolio_price")
+            port_exit = st.number_input("Exit Price (Optional)", value=0.0, min_value=0.0, key="portfolio_exit_price")
             
             if st.button("➕ Add to Portfolio", type="primary", use_container_width=True):
-                add_to_portfolio(port_symbol, port_qty, port_price)
+                exit_price = port_exit if port_exit > 0 else None
+                add_to_portfolio(port_symbol, port_qty, port_price, exit_price=exit_price)
                 st.rerun()
         
         with col_port2:
@@ -837,7 +858,7 @@ def main():
         
         with col_wl1:
             st.markdown("#### 📝 Create/Import")
-            wl_name = st.text_input("Watchlist Name", placeholder="My Favorites")
+            wl_name = st.text_input("Watchlist Name", placeholder="My Favorites", key="watchlist_name")
             wl_symbols = st.text_area("Symbols (one per line)", placeholder="AAPL\nMSFT\nGOOG")
             
             if st.button("💾 Save Watchlist", use_container_width=True, type="primary"):
@@ -876,14 +897,14 @@ def main():
             st.markdown("#### 📧 Email Alerts")
             email_enabled = st.checkbox("Enable Email Alerts", value=st.session_state.preferences.get('email_enabled', False))
             if email_enabled:
-                alert_email = st.text_input("Alert Email", placeholder="you@example.com")
+                alert_email = st.text_input("Alert Email", placeholder="you@example.com", key="alert_email_input")
                 alert_type = st.selectbox("Alert Type", ["Price Target", "RSI Extreme", "Volume Spike", "News Alert"])
         
         with col_set2:
             st.markdown("#### 📱 SMS & Desktop")
             sms_enabled = st.checkbox("Enable SMS Alerts (Twilio)", value=st.session_state.preferences.get('sms_enabled', False))
             if sms_enabled:
-                phone_number = st.text_input("Phone Number", placeholder="+1 555-0000")
+                phone_number = st.text_input("Phone Number", placeholder="+1 555-0000", key="sms_phone_number")
             
             desktop_enabled = st.checkbox("Enable Desktop Alerts", value=st.session_state.preferences.get('desktop_alerts', True))
         
@@ -893,10 +914,10 @@ def main():
         col_alert1, col_alert2, col_alert3 = st.columns(3)
         
         with col_alert1:
-            alert_symbol = st.text_input("Symbol", placeholder="AAPL")
+            alert_symbol = st.text_input("Symbol", placeholder="AAPL", key="alert_symbol")
         
         with col_alert2:
-            alert_price = st.number_input("Target Price", value=100.0, min_value=0.01)
+            alert_price = st.number_input("Target Price", value=100.0, min_value=0.01, key="alert_target_price")
         
         with col_alert3:
             alert_condition = st.selectbox("Condition", ["Above", "Below"])
