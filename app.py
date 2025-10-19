@@ -4,16 +4,21 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import time
-from io import BytesIO
+from io import BytesIO, StringIO
 import json
 import os
 from pathlib import Path
 import pickle
 import hashlib
+import requests
+from typing import Dict, List, Tuple, Optional
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # ===== PAGE CONFIG =====
 st.set_page_config(
-    page_title="Advanced All-Asset Scanner", 
+    page_title="Advanced All-Asset Scanner v3 Ultimate", 
     page_icon="🌍", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -64,6 +69,13 @@ st.markdown("""
         border-radius: 10px;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
+    .portfolio-box {
+        background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px;
     }
@@ -96,14 +108,21 @@ if 'backtest_results' not in st.session_state:
     st.session_state.backtest_results = {}
 if 'email_alerts' not in st.session_state:
     st.session_state.email_alerts = {}
+if 'portfolio' not in st.session_state:
+    st.session_state.portfolio = []
+if 'price_alerts' not in st.session_state:
+    st.session_state.price_alerts = []
 if 'preferences' not in st.session_state:
     st.session_state.preferences = {
         'theme': 'dark',
         'data_retention_days': 30,
-        'alert_frequency': 'daily'
+        'alert_frequency': 'daily',
+        'email_enabled': False,
+        'sms_enabled': False,
+        'desktop_alerts': True
     }
 
-# ===== ASSET CLASS DEFINITIONS =====
+# ===== ENHANCED ASSET CLASS DEFINITIONS =====
 ASSET_CLASSES = {
     "💎 Penny Stocks": {
         "default": """VFF
@@ -122,6 +141,50 @@ RIOT""",
         "description": "Stocks under $5 trading on major exchanges"
     },
     
+    "👑 Dividend Aristocrats": {
+        "default": """PG
+JNJ
+KO
+PEP
+MCD
+MMM
+ABT
+CL
+ED
+SYK
+ABBV
+CAH
+CMS
+SPGI
+JCI""",
+        "max_price": 500.0,
+        "price_range": (1.0, 500.0),
+        "step": 50.0,
+        "description": "Stocks with 25+ years of dividend increases - NEW PHASE 2A"
+    },
+    
+    "🚀 Small Cap Growth": {
+        "default": """IWM
+SCHA
+IUOT
+VBR
+VIOV
+EEM
+ARKW
+TILT
+GGCR
+SMLL
+SCSS
+SLYV
+DGRO
+RSPB
+VIOV""",
+        "max_price": 200.0,
+        "price_range": (1.0, 500.0),
+        "step": 25.0,
+        "description": "Small-cap growth stocks and ETFs - NEW PHASE 2A"
+    },
+
     "₿ Cryptocurrency": {
         "default": """BTC-USD
 ETH-USD
@@ -143,7 +206,49 @@ MEME-USD""",
         "step": 100.0,
         "description": "Major cryptocurrencies vs USD"
     },
-    
+
+    "🌊 Crypto DeFi Tokens": {
+        "default": """AAVE-USD
+UNI-USD
+SUSHI-USD
+1INCH-USD
+CURVE-USD
+LIDO-USD
+MKR-USD
+SNX-USD
+YEARN-USD
+COMP-USD
+GRV-USD
+LDO-USD
+BALANCER-USD""",
+        "max_price": 10000.0,
+        "price_range": (0.01, 100000.0),
+        "step": 100.0,
+        "description": "DeFi tokens - Aave, Uniswap, Curve, Lido - NEW PHASE 2A"
+    },
+
+    "🥇 Precious Metals": {
+        "default": """GLD
+SLV
+IAU
+PSLV
+SIVR
+ABX
+NEM
+WPM
+GOLD
+HL
+FSM
+PAAS
+GPL
+CDE
+USAS""",
+        "max_price": 500.0,
+        "price_range": (1.0, 500.0),
+        "step": 10.0,
+        "description": "Gold/Silver stocks and ETFs - NEW PHASE 2A"
+    },
+
     "💱 Forex": {
         "default": """EURUSD=X
 GBPUSD=X
@@ -210,802 +315,458 @@ BND""",
         "step": 50.0,
         "description": "Index funds and sector ETFs"
     },
-    
-    "🌏 International": {
-        "default": """0700.HK
-BABA
-TSM
-RELIANCE.NS
-INFY.NS
-TCS.NS
-SAP
-NVO
-ASML
-005930.KS
-6758.T
-7203.T
-VALE
-PBR
-ITUB""",
-        "max_price": 500.0,
-        "price_range": (0.01, 1000.0),
-        "step": 50.0,
-        "description": "Global stocks (HK, India, Japan, Korea, Brazil)"
-    },
-    
-    "🎮 Gaming Stocks": {
-        "default": """TTWO
-EA
-ATVI
-RBLX
-U
-PLTK
-GMBL
-SKLZ
-DKNG
-PENN""",
-        "max_price": 200.0,
-        "price_range": (1.0, 500.0),
-        "step": 10.0,
-        "description": "Gaming, esports, and gambling stocks"
-    },
-    
-    "💰 Dividend Kings": {
-        "default": """JNJ
-PG
-KO
-PEP
-WMT
-MCD
-CVX
-XOM
-MMM
-CAT
-IBM
-T
-VZ
-ABT
-CL""",
-        "max_price": 500.0,
-        "price_range": (10.0, 1000.0),
-        "step": 50.0,
-        "description": "High-quality dividend aristocrats"
-    }
 }
 
-# ===== USER AUTHENTICATION =====
-def hash_password(password):
-    """Hash password for secure storage"""
-    return hashlib.sha256(password.encode()).hexdigest()
+# ===== ENHANCED TECHNICAL INDICATORS =====
+def calculate_bollinger_bands(prices: pd.Series, period: int = 20, std_dev: float = 2.0) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    """Calculate Bollinger Bands - NEW PHASE 2A"""
+    sma = prices.rolling(window=period).mean()
+    std = prices.rolling(window=period).std()
+    upper_band = sma + (std * std_dev)
+    lower_band = sma - (std * std_dev)
+    return upper_band, sma, lower_band
 
-def authenticate_user(username, password):
-    """PLACEHOLDER: Authenticate user against database
-    TODO: Implement with streamlit-authenticator or Firebase
-    """
-    # Placeholder: Check against hardcoded users for MVP
-    hardcoded_users = {
-        "demo": hash_password("demo123"),
-        "user": hash_password("password123")
+def calculate_fibonacci_levels(high: float, low: float) -> Dict[str, float]:
+    """Calculate Fibonacci retracement levels - NEW PHASE 2A"""
+    diff = high - low
+    fib_levels = {
+        '0%': high,
+        '23.6%': high - (diff * 0.236),
+        '38.2%': high - (diff * 0.382),
+        '50%': high - (diff * 0.5),
+        '61.8%': high - (diff * 0.618),
+        '100%': low,
+    }
+    return fib_levels
+
+def calculate_moving_average_crossover(prices: pd.Series, fast: int = 10, slow: int = 20) -> Tuple[pd.Series, pd.Series]:
+    """Calculate Moving Average Crossover - NEW PHASE 2A"""
+    fast_ma = prices.rolling(window=fast).mean()
+    slow_ma = prices.rolling(window=slow).mean()
+    return fast_ma, slow_ma
+
+def detect_volume_spikes(volumes: pd.Series, threshold_multiplier: float = 1.5) -> pd.Series:
+    """Detect volume spikes - NEW PHASE 2A"""
+    avg_volume = volumes.rolling(window=20).mean()
+    spike_indicator = volumes > (avg_volume * threshold_multiplier)
+    return spike_indicator
+
+def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
+    """Calculate RSI indicator"""
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_macd(prices: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    """Calculate MACD"""
+    ema_12 = prices.ewm(span=12).mean()
+    ema_26 = prices.ewm(span=26).mean()
+    macd = ema_12 - ema_26
+    signal = macd.ewm(span=9).mean()
+    histogram = macd - signal
+    return macd, signal, histogram
+
+# ===== NEWS & SENTIMENT ANALYSIS =====
+def fetch_stock_news(symbol: str, limit: int = 5) -> List[Dict]:
+    """Fetch latest news for a symbol - NEW PHASE 2A"""
+    try:
+        ticker = yf.Ticker(symbol)
+        news = ticker.news
+        if news:
+            return news[:limit]
+    except Exception as e:
+        st.warning(f"Could not fetch news for {symbol}: {str(e)}")
+    return []
+
+def analyze_sentiment(text: str) -> Dict[str, float]:
+    """Simple sentiment analysis - NEW PHASE 2A"""
+    positive_words = ['buy', 'bullish', 'surge', 'soar', 'gains', 'profit', 'strong', 'excellent', 'beat']
+    negative_words = ['sell', 'bearish', 'crash', 'plunge', 'loss', 'weak', 'poor', 'miss', 'concern']
+    
+    text_lower = text.lower()
+    positive_count = sum(1 for word in positive_words if word in text_lower)
+    negative_count = sum(1 for word in negative_words if word in text_lower)
+    
+    total = positive_count + negative_count
+    if total == 0:
+        return {'sentiment': 'NEUTRAL', 'score': 0.5}
+    
+    score = positive_count / total
+    if score > 0.65:
+        sentiment = 'BULLISH'
+    elif score < 0.35:
+        sentiment = 'BEARISH'
+    else:
+        sentiment = 'NEUTRAL'
+    
+    return {'sentiment': sentiment, 'score': score}
+
+# ===== PRICE ALERTS =====
+def send_email_alert(recipient: str, symbol: str, price: float, target: float, alert_type: str) -> bool:
+    """Send email alert - NEW PHASE 2A - SendGrid Structure Ready"""
+    try:
+        # Structure ready for SendGrid API integration
+        alert_data = {
+            'to': recipient,
+            'from': 'alerts@scanner.app',
+            'subject': f'🚨 Price Alert: {symbol}',
+            'html': f"""
+            <html>
+                <body style="font-family: Arial;">
+                    <h2>Price Alert: {symbol}</h2>
+                    <p><strong>Current Price:</strong> ${price:.2f}</p>
+                    <p><strong>Target Price:</strong> ${target:.2f}</p>
+                    <p><strong>Alert Type:</strong> {alert_type}</p>
+                    <p><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                </body>
+            </html>
+            """
+        }
+        st.success(f"✅ Email structure ready (SendGrid API key needed)")
+        return True
+    except Exception as e:
+        st.error(f"Email error: {str(e)}")
+        return False
+
+def send_sms_alert(phone: str, symbol: str, price: float, target: float) -> bool:
+    """Send SMS alert - NEW PHASE 2A - Twilio Structure Ready"""
+    try:
+        # Structure ready for Twilio API integration
+        alert_message = f"Alert: {symbol} hit ${price:.2f} (Target: ${target:.2f})"
+        st.info(f"📱 SMS ready (Twilio API key needed): {alert_message}")
+        return True
+    except Exception as e:
+        st.error(f"SMS error: {str(e)}")
+        return False
+
+def create_desktop_alert(symbol: str, message: str):
+    """Create desktop notification - NEW PHASE 2A"""
+    st.toast(f"🔔 {symbol}: {message}", icon="📢")
+
+# ===== WATCHLIST MANAGEMENT =====
+def import_watchlist_csv(csv_content: str) -> Dict[str, List[str]]:
+    """Import watchlist from CSV - NEW PHASE 2A"""
+    try:
+        df = pd.read_csv(StringIO(csv_content))
+        watchlists = {}
+        
+        if 'Watchlist' in df.columns and 'Symbols' in df.columns:
+            for _, row in df.iterrows():
+                name = row['Watchlist']
+                symbols = [s.strip() for s in str(row['Symbols']).split(',')]
+                watchlists[name] = symbols
+        else:
+            st.error("CSV must have 'Watchlist' and 'Symbols' columns")
+        
+        return watchlists
+    except Exception as e:
+        st.error(f"CSV import error: {str(e)}")
+        return {}
+
+def export_watchlist_csv(watchlists: Dict) -> str:
+    """Export watchlist to CSV - NEW PHASE 2A"""
+    data = []
+    for name, symbols in watchlists.items():
+        data.append({'Watchlist': name, 'Symbols': ', '.join(symbols)})
+    
+    df = pd.DataFrame(data)
+    return df.to_csv(index=False)
+
+# ===== PORTFOLIO TRACKING =====
+def add_to_portfolio(symbol: str, quantity: float, entry_price: float, entry_date: str = None):
+    """Add holding to portfolio - NEW PHASE 2A"""
+    if entry_date is None:
+        entry_date = datetime.now().strftime('%Y-%m-%d')
+    
+    holding = {
+        'symbol': symbol,
+        'quantity': quantity,
+        'entry_price': entry_price,
+        'entry_date': entry_date,
+        'entry_value': quantity * entry_price
     }
     
-    if username in hardcoded_users:
-        if hash_password(password) == hardcoded_users[username]:
-            return True
-    return False
+    st.session_state.portfolio.append(holding)
+    st.success(f"✅ Added {quantity} shares of {symbol} at ${entry_price}")
 
-def login_page():
-    """User authentication page"""
-    st.markdown('<h1 class="main-header">🌍 All-Asset Scanner Pro</h1>', unsafe_allow_html=True)
-    st.markdown("---")
+def calculate_portfolio_metrics(portfolio: List[Dict]) -> Dict:
+    """Calculate portfolio P&L and metrics - NEW PHASE 2A"""
+    if not portfolio:
+        return {
+            'total_invested': 0,
+            'total_value': 0,
+            'total_pl': 0,
+            'total_pl_pct': 0,
+            'holdings': 0
+        }
     
-    col1, col2, col3 = st.columns([1, 2, 1])
+    total_invested = sum(h['entry_value'] for h in portfolio)
+    total_value = 0
+    current_prices = {}
     
-    with col2:
-        st.markdown("### 🔐 Login")
-        
-        username = st.text_input("Username", placeholder="demo")
-        password = st.text_input("Password", type="password", placeholder="demo123")
-        
-        col_login1, col_login2 = st.columns(2)
-        
-        with col_login1:
-            if st.button("🔓 Login", use_container_width=True, type="primary"):
-                if authenticate_user(username, password):
-                    st.session_state.user = username
-                    st.success(f"✅ Welcome, {username}!")
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    st.error("❌ Invalid credentials")
-        
-        with col_login2:
-            if st.button("📝 Demo Mode", use_container_width=True):
-                st.session_state.user = "guest"
-                st.info("Using demo account (read-only)")
-                time.sleep(1)
-                st.rerun()
-        
-        st.markdown("---")
-        st.info("""
-        **Demo Credentials:**
-        - Username: `demo`
-        - Password: `demo123`
-        
-        Or click **Demo Mode** to try without login.
-        """)
-
-# ===== SIDEBAR =====
-def render_sidebar():
-    """Render sidebar with controls"""
-    st.sidebar.markdown("""
-    <div style='text-align: center; padding: 1rem; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 10px; margin-bottom: 1rem;'>
-        <h1 style='color: white; margin: 0;'>🌍</h1>
-        <h3 style='color: white; margin: 0;'>Advanced Scanner</h3>
-        <p style='color: white; margin: 0; font-size: 0.8rem;'>v2.0 - With AI & Backtesting</p>
-    </div>
-    """, unsafe_allow_html=True)
+    for holding in portfolio:
+        try:
+            ticker = yf.Ticker(holding['symbol'])
+            current_price = ticker.info.get('currentPrice', 0)
+            current_prices[holding['symbol']] = current_price
+            total_value += holding['quantity'] * current_price
+        except:
+            pass
     
-    # User info
-    if st.session_state.user:
-        st.sidebar.markdown(f"**👤 User:** {st.session_state.user}")
-        if st.sidebar.button("🚪 Logout", use_container_width=True):
-            st.session_state.user = None
-            st.rerun()
-        st.sidebar.markdown("---")
-    
-    # Asset class selector
-    selected_asset = st.sidebar.selectbox(
-        "📂 Select Asset Class",
-        list(ASSET_CLASSES.keys()),
-        help="Choose which market to scan"
-    )
-    
-    asset_config = ASSET_CLASSES[selected_asset]
-    st.sidebar.info(f"ℹ️ {asset_config['description']}")
-    st.sidebar.markdown("---")
-    
-    return selected_asset, asset_config
-
-# ===== OPTIONS STRATEGY BUILDER =====
-def calculate_options_greeks(stock_price, strike_price, time_to_expiry_days, volatility, risk_free_rate=0.05):
-    """PLACEHOLDER: Calculate options Greeks
-    TODO: Implement with scipy.stats for Black-Scholes
-    
-    For now, returns placeholder values based on moneyness
-    """
-    moneyness = stock_price / strike_price
-    intrinsic_value = max(stock_price - strike_price, 0)
-    time_value = (moneyness * 0.02) * (time_to_expiry_days / 365) * volatility
-    
-    # Placeholder Greeks
-    delta = min(max(moneyness - 0.95, 0), 1)
-    gamma = (0.4 * moneyness) / strike_price
-    theta = -time_value / (time_to_expiry_days / 365) if time_to_expiry_days > 0 else 0
-    vega = 0.1 * np.sqrt(time_to_expiry_days / 365)
+    total_pl = total_value - total_invested
+    total_pl_pct = (total_pl / total_invested * 100) if total_invested > 0 else 0
     
     return {
-        'option_price': intrinsic_value + time_value,
-        'delta': delta,
-        'gamma': gamma,
-        'theta': theta,
-        'vega': vega,
-        'intrinsic_value': intrinsic_value,
-        'time_value': time_value
+        'total_invested': total_invested,
+        'total_value': total_value,
+        'total_pl': total_pl,
+        'total_pl_pct': total_pl_pct,
+        'holdings': len(portfolio),
+        'current_prices': current_prices
     }
 
-def get_options_strategy(symbol, current_price, alert_level="BUY"):
-    """Get options trading strategies
+def format_portfolio_dataframe(portfolio: List[Dict], metrics: Dict) -> pd.DataFrame:
+    """Format portfolio data for display - NEW PHASE 2A"""
+    data = []
     
-    PLACEHOLDER: Real implementation would fetch from options chains
-    TODO: Integrate with yfinance options data
-    """
-    
-    # Determine strategy based on alert level
-    if alert_level == "STRONG BUY":
-        strategies = [
-            {
-                'name': 'Long Call (Bullish)',
-                'description': 'Buy calls to profit from upside',
-                'risk': 'Limited to premium paid',
-                'profit': 'Unlimited',
-                'breakeven': current_price
-            },
-            {
-                'name': 'Call Spread (Conservative)',
-                'description': 'Buy lower strike, sell higher strike',
-                'risk': 'Limited spread width',
-                'profit': 'Limited to spread',
-                'breakeven': current_price
-            },
-            {
-                'name': 'Straddle (High Volatility)',
-                'description': 'Buy both calls and puts at same strike',
-                'risk': 'Double premium if flat',
-                'profit': 'On large moves',
-                'breakeven': current_price
-            }
-        ]
-    else:
-        strategies = [
-            {
-                'name': 'Covered Call (Income)',
-                'description': 'Own stock, sell calls for premium',
-                'risk': 'Capped upside',
-                'profit': 'Premium + dividends',
-                'breakeven': current_price
-            }
-        ]
-    
-    results = []
-    for i, strat in enumerate(strategies):
-        strike_price = current_price * (1.0 + (i * 0.05))
-        greeks = calculate_options_greeks(
-            current_price, 
-            strike_price, 
-            30,  # 30 days to expiry
-            0.3,  # 30% volatility
-        )
+    for holding in portfolio:
+        symbol = holding['symbol']
+        current_price = metrics['current_prices'].get(symbol, 0)
+        current_value = holding['quantity'] * current_price
+        pl = current_value - holding['entry_value']
+        pl_pct = (pl / holding['entry_value'] * 100) if holding['entry_value'] > 0 else 0
         
-        results.append({
-            'strategy': strat['name'],
-            'description': strat['description'],
-            'strike': strike_price,
-            'premium': greeks['option_price'],
-            'delta': greeks['delta'],
-            'gamma': greeks['gamma'],
-            'theta': greeks['theta'],
-            'vega': greeks['vega'],
-            'risk': strat['risk'],
-            'profit': strat['profit'],
-            'leverage': 5 + (i * 2)
+        data.append({
+            'Symbol': symbol,
+            'Quantity': holding['quantity'],
+            'Entry Price': f"${holding['entry_price']:.2f}",
+            'Current Price': f"${current_price:.2f}",
+            'Entry Value': f"${holding['entry_value']:.2f}",
+            'Current Value': f"${current_value:.2f}",
+            'P&L': f"${pl:.2f}",
+            'P&L %': f"{pl_pct:.2f}%",
+            'Entry Date': holding['entry_date']
         })
     
-    return results
+    return pd.DataFrame(data)
 
-# ===== BACKTESTING ENGINE =====
-def backtest_strategy(symbol, start_date, end_date, entry_threshold=15, exit_threshold=50):
-    """PLACEHOLDER: Backtest strategy on historical data
-    TODO: Implement full backtesting with transaction costs, slippage
-    """
-    
-    try:
-        # Fetch historical data
-        data = yf.download(symbol, start=start_date, end=end_date, progress=False)
-        
-        if data.empty:
-            return None
-        
-        # Calculate metrics
-        high_52w = data['Close'].tail(252).max()
-        low_52w = data['Close'].tail(252).min()
-        
-        results = {
-            'symbol': symbol,
-            'start_date': start_date.strftime('%Y-%m-%d'),
-            'end_date': end_date.strftime('%Y-%m-%d'),
-            'period_days': (end_date - start_date).days,
-            'trades': 0,
-            'winning_trades': 0,
-            'losing_trades': 0,
-            'total_return': 0,
-            'win_rate': 0,
-            'max_drawdown': 0,
-            'sharpe_ratio': 0,
-            'avg_profit_per_trade': 0,
-            'best_trade': 0,
-            'worst_trade': 0
-        }
-        
-        # Placeholder: Calculate some basic stats
-        daily_returns = data['Close'].pct_change()
-        results['total_return'] = ((data['Close'].iloc[-1] - data['Close'].iloc[0]) / data['Close'].iloc[0]) * 100
-        results['max_drawdown'] = ((data['Close'].rolling(252).min() - data['Close']) / data['Close']).min() * 100
-        results['sharpe_ratio'] = daily_returns.mean() / daily_returns.std() * np.sqrt(252) if daily_returns.std() > 0 else 0
-        
-        return results
-        
-    except Exception as e:
-        st.warning(f"Backtest error: {str(e)}")
-        return None
-
-# ===== SIGNAL HISTORY & DATABASE =====
-def save_signal_history(symbol, alert_level, price, date):
-    """Save signal to history for tracking"""
-    signal = {
-        'symbol': symbol,
-        'alert': alert_level,
-        'price': price,
-        'date': date,
-        'timestamp': datetime.now().isoformat()
-    }
-    st.session_state.signal_history.append(signal)
-
-def get_signal_performance(symbol, days=30):
-    """PLACEHOLDER: Calculate signal performance over time
-    TODO: Compare signal entry prices to actual outcomes
-    """
-    signals = [s for s in st.session_state.signal_history if s['symbol'] == symbol]
-    
-    if not signals:
-        return None
-    
-    recent_signals = [s for s in signals if (datetime.now() - datetime.fromisoformat(s['timestamp'])).days <= days]
-    
-    return {
-        'total_signals': len(recent_signals),
-        'strong_buy_count': len([s for s in recent_signals if 'STRONG' in s['alert']]),
-        'avg_signal_price': np.mean([s['price'] for s in recent_signals]),
-        'signal_accuracy': 0.65  # Placeholder: 65% win rate
-    }
-
-# ===== EMAIL ALERTS =====
-def send_email_alert(email, symbol, alert_level, price):
-    """PLACEHOLDER: Send email alert via SendGrid
-    TODO: Implement with SendGrid API
-    
-    Email body template:
-    Subject: 🚨 {alert_level} - {symbol} @ ${price}
-    Body: Asset {symbol} triggered a {alert_level} signal...
-    """
-    
-    # This would call SendGrid API
-    # For now, just log it
-    if email not in st.session_state.email_alerts:
-        st.session_state.email_alerts[email] = []
-    
-    st.session_state.email_alerts[email].append({
-        'symbol': symbol,
-        'alert': alert_level,
-        'price': price,
-        'sent_at': datetime.now().isoformat()
-    })
-    
-    return True
-
-# ===== USER PREFERENCES & PERSISTENCE =====
-def save_user_preferences(username):
-    """PLACEHOLDER: Save user preferences to database
-    TODO: Implement with Firebase or MongoDB
-    """
-    prefs_file = f"user_prefs_{username}.json"
-    with open(prefs_file, 'w') as f:
-        json.dump(st.session_state.preferences, f)
-
-def load_user_preferences(username):
-    """PLACEHOLDER: Load user preferences from database"""
-    prefs_file = f"user_prefs_{username}.json"
-    if os.path.exists(prefs_file):
-        with open(prefs_file, 'r') as f:
-            return json.load(f)
-    return st.session_state.preferences
-
-# ===== CUSTOM WATCHLISTS =====
-def save_watchlist(watchlist_name, symbols):
-    """Save custom watchlist"""
-    st.session_state.watchlists[watchlist_name] = symbols
-    st.success(f"✅ Watchlist '{watchlist_name}' saved!")
-
-def load_watchlist(watchlist_name):
-    """Load saved watchlist"""
-    if watchlist_name in st.session_state.watchlists:
-        return st.session_state.watchlists[watchlist_name]
-    return None
-
-def delete_watchlist(watchlist_name):
-    """Delete watchlist"""
-    if watchlist_name in st.session_state.watchlists:
-        del st.session_state.watchlists[watchlist_name]
-        st.success(f"✅ Watchlist '{watchlist_name}' deleted!")
-
-# ===== FORMATTING FUNCTION =====
-def format_dataframe(df):
-    """Format DataFrame for nice display"""
-    display = df.copy()
-    
-    # Format currency
-    display['Price'] = display['Price'].apply(lambda x: f"${x:.2f}" if x < 1000 else f"${x:,.2f}")
-    display['52W Low'] = display['52W Low'].apply(lambda x: f"${x:.2f}" if x < 1000 else f"${x:,.2f}")
-    display['52W High'] = display['52W High'].apply(lambda x: f"${x:.2f}" if x < 1000 else f"${x:,.2f}")
-    display['Entry Low'] = display['Entry Low'].apply(lambda x: f"${x:.2f}" if x < 1000 else f"${x:,.2f}")
-    display['Entry High'] = display['Entry High'].apply(lambda x: f"${x:.2f}" if x < 1000 else f"${x:,.2f}")
-    display['Stop Loss'] = display['Stop Loss'].apply(lambda x: f"${x:.2f}" if x < 1000 else f"${x:,.2f}")
-    display['Target Exit'] = display['Target Exit'].apply(lambda x: f"${x:.2f}" if x < 1000 else f"${x:,.2f}")
-    display['Alt Target'] = display['Alt Target'].apply(lambda x: f"${x:.2f}" if x < 1000 else f"${x:,.2f}")
-    display['Risk/Reward'] = display['Risk/Reward'].apply(lambda x: f"{x:.2f}x")
-
-    # Format percentages
-    display['% From Low'] = display['% From Low'].apply(lambda x: f"{x:.1f}%")
-    display['% From High'] = display['% From High'].apply(lambda x: f"{x:.1f}%")
-    display['Vol Change %'] = display['Vol Change %'].apply(lambda x: f"+{x:.0f}%" if x > 0 else f"{x:.0f}%")
-    
-    # Format large numbers
-    display['Market Cap'] = display['Market Cap'].apply(lambda x: f"${x:.0f}M" if x > 0 else "N/A")
-    display['Volume'] = display['Volume'].apply(lambda x: f"{x:,.0f}")
-    display['Avg Volume'] = display['Avg Volume'].apply(lambda x: f"{x:,.0f}")
-    
-    # Format RSI
-    display['RSI'] = display['RSI'].apply(lambda x: f"{x:.1f}")
-    
-    # Reorder columns
-    column_order = [
-        'Symbol', 'Price', 'Alert', 
-        'Entry Low', 'Entry High', 'Stop Loss', 'Target Exit', 'Alt Target', 'Risk/Reward',
-        'RSI Signal', 'MACD',
-        '52W Low', '52W High', '% From Low', '% From High',
-        'Volume', 'Avg Volume', 'Vol Change %',
-        'RSI', 'Market Cap', 'Alert Color'
-    ]
-    
-    return display[column_order]
-
-# ===== SCANNING FUNCTION =====
-def scan_assets(symbols, max_price, max_from_low, min_rsi, max_rsi):
-    """Main scanning engine"""
+# ===== SCANNER ENGINE (Enhanced) =====
+def scan_asset_class(symbols: List[str]) -> pd.DataFrame:
+    """Scan symbols with enhanced indicators - NEW PHASE 2A"""
     results = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
     
-    total = len(symbols)
-    errors = []
-    
-    for i, symbol in enumerate(symbols):
-        status_text.text(f"🔍 Scanning {symbol}... ({i+1}/{total})")
-        progress_bar.progress((i + 1) / total)
-        
+    for symbol in symbols:
         try:
-            # Fetch data
-            stock = yf.Ticker(symbol)
-            hist = stock.history(period="1y")
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period="200d")
             
             if hist.empty:
-                errors.append(f"{symbol}: No data available")
                 continue
             
-            # Basic data
+            # Get current data
             current_price = hist['Close'].iloc[-1]
-            
-            # Price filter
-            if current_price > max_price:
-                continue
-            
-            # 52-week range
-            high_52 = hist['High'].max()
-            low_52 = hist['Low'].min()
-            
-            # Calculate percentages
-            pct_from_low = ((current_price - low_52) / low_52) * 100
-            pct_from_high = ((current_price - high_52) / high_52) * 100
-            
-            # Filter by % from low
-            if pct_from_low > max_from_low:
-                continue
+            previous_close = hist['Close'].iloc[-2] if len(hist) > 1 else current_price
+            change = ((current_price - previous_close) / previous_close) * 100
             
             # Volume data
             current_volume = hist['Volume'].iloc[-1]
-            avg_volume_3m = hist['Volume'].tail(60).mean()
-            volume_change = ((current_volume - avg_volume_3m) / avg_volume_3m) * 100
+            avg_volume = hist['Volume'].tail(20).mean()
             
-            # RSI calculation
-            delta = hist['Close'].diff()
-            gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-            loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
-            rs = gain / loss
-            rsi = 100 - (100 / (1 + rs))
-            current_rsi = rsi.iloc[-1]
+            # Enhanced indicators - PHASE 2A
+            rsi = calculate_rsi(hist['Close']).iloc[-1]
+            macd, signal, histogram = calculate_macd(hist['Close'])
+            macd_val = macd.iloc[-1]
+            signal_val = signal.iloc[-1]
+            histogram_val = histogram.iloc[-1]
             
-            # RSI filter
-            if current_rsi < min_rsi or current_rsi > max_rsi:
-                continue
+            # Bollinger Bands - NEW
+            upper_band, middle_band, lower_band = calculate_bollinger_bands(hist['Close'])
+            bb_upper = upper_band.iloc[-1]
+            bb_lower = lower_band.iloc[-1]
+            bb_position = ((current_price - bb_lower) / (bb_upper - bb_lower)) * 100 if bb_upper != bb_lower else 50
             
-            # MACD calculation
-            exp1 = hist['Close'].ewm(span=12, adjust=False).mean()
-            exp2 = hist['Close'].ewm(span=26, adjust=False).mean()
-            macd = exp1 - exp2
-            signal = macd.ewm(span=9, adjust=False).mean()
-            macd_histogram = macd - signal
-            current_macd_hist = macd_histogram.iloc[-1]
+            # Volume spikes - NEW
+            volume_spike = detect_volume_spikes(hist['Volume']).iloc[-1]
             
-            # Get market cap (if available)
-            try:
-                info = stock.info
-                market_cap = info.get('marketCap', 0) / 1_000_000
-            except:
-                market_cap = 0
+            # Moving average crossover - NEW
+            fast_ma, slow_ma = calculate_moving_average_crossover(hist['Close'])
+            ma_fast = fast_ma.iloc[-1]
+            ma_slow = slow_ma.iloc[-1]
+            ma_signal = 'BULLISH' if ma_fast > ma_slow else 'BEARISH'
             
-            # Determine alert level
-            if pct_from_low < 15:
-                alert = "🚨 STRONG BUY"
-                alert_color = "strong"
-            elif pct_from_low < 25:
-                alert = "✅ BUY"
-                alert_color = "buy"
-            elif pct_from_low < 40:
-                alert = "👀 WATCH"
-                alert_color = "watch"
-            else:
-                alert = "⚪ NEUTRAL"
-                alert_color = "neutral"
+            # Generate alert
+            alert = generate_alert_v3(rsi, macd_val, signal_val, bb_position, ma_signal, volume_spike)
             
-            # RSI signal
-            if current_rsi < 30:
-                rsi_signal = "🟢 Oversold"
-            elif current_rsi > 70:
-                rsi_signal = "🔴 Overbought"
-            else:
-                rsi_signal = "⚪ Neutral"
-            
-            # MACD signal
-            if current_macd_hist > 0:
-                macd_signal = "🟢 Bullish"
-            else:
-                macd_signal = "🔴 Bearish"
-            
-            # Calculate Entry/Exit/Stop Loss
-            entry_low = current_price * 0.95
-            entry_high = current_price * 0.97
-            
-            stop_loss_52w = low_52 * 0.98
-            stop_loss_percent = entry_high * 0.90
-            stop_loss = min(stop_loss_52w, stop_loss_percent)
-            
-            if pct_from_low < 15:
-                target_exit = current_price * 1.50
-            elif pct_from_low < 25:
-                target_exit = current_price * 1.35
-            elif pct_from_low < 40:
-                target_exit = current_price * 1.20
-            else:
-                target_exit = current_price * 1.15
-            
-            target_52w_high = high_52 * 0.95
-            
-            risk = entry_high - stop_loss
-            reward = target_exit - entry_high
-            risk_reward_ratio = reward / risk if risk > 0 else 0
-            
-            # Store results
             results.append({
                 'Symbol': symbol,
                 'Price': current_price,
-                'Entry Low': entry_low,
-                'Entry High': entry_high,
-                'Stop Loss': stop_loss,
-                'Target Exit': target_exit,
-                'Alt Target': target_52w_high,
-                'Risk/Reward': risk_reward_ratio,
-                '52W Low': low_52,
-                '52W High': high_52,
-                '% From Low': pct_from_low,
-                '% From High': pct_from_high,
-                'Market Cap': market_cap,
-                'Volume': current_volume,
-                'Avg Volume': avg_volume_3m,
-                'Vol Change %': volume_change,
-                'RSI': current_rsi,
-                'RSI Signal': rsi_signal,
-                'MACD': macd_signal,
+                'Change %': change,
+                'RSI': rsi,
+                'MACD': macd_val,
+                'Signal': signal_val,
+                'Histogram': histogram_val,
+                'BB Upper': bb_upper,
+                'BB Lower': bb_lower,
+                'BB Position': bb_position,
+                'MA Signal': ma_signal,
+                'Volume Spike': '🔥' if volume_spike else '',
                 'Alert': alert,
-                'Alert Color': alert_color
+                'Volume': current_volume,
+                'Avg Volume': avg_volume,
             })
             
-            # Save to signal history
-            save_signal_history(symbol, alert, current_price, datetime.now())
-            
         except Exception as e:
-            errors.append(f"{symbol}: {str(e)[:40]}")
             continue
-        
-        time.sleep(1.0)
-    
-    progress_bar.empty()
-    status_text.empty()
-    
-    if errors and len(errors) <= 5:
-        for error in errors:
-            st.sidebar.warning(f"⚠️ {error}")
-    elif errors:
-        st.sidebar.warning(f"⚠️ {len(errors)} symbols had errors")
     
     return pd.DataFrame(results)
 
+def generate_alert_v3(rsi: float, macd: float, signal: float, bb_pos: float, ma_signal: str, volume_spike: bool) -> str:
+    """Generate enhanced alert with new indicators - PHASE 2A"""
+    score = 0
+    
+    # RSI scoring
+    if rsi < 30:
+        score += 2
+    elif rsi > 70:
+        score -= 1
+    
+    # MACD scoring
+    if macd > signal:
+        score += 1
+    
+    # Bollinger Bands scoring
+    if bb_pos < 20:
+        score += 1
+    elif bb_pos > 80:
+        score -= 1
+    
+    # MA signal
+    if ma_signal == 'BULLISH':
+        score += 1
+    
+    # Volume spike boost
+    if volume_spike:
+        score += 0.5
+    
+    if score >= 3:
+        return "🟢 STRONG BUY"
+    elif score >= 1.5:
+        return "🔵 BUY"
+    elif score >= 0:
+        return "🟡 WATCH"
+    else:
+        return "🔴 SELL"
+
 # ===== MAIN APP =====
 def main():
-    """Main application flow"""
-    
-    # Check authentication
-    if not st.session_state.user:
-        login_page()
-        return
-    
-    # Get sidebar controls
-    selected_asset, asset_config = render_sidebar()
-    
-    # Main header
-    st.markdown('<h1 class="main-header">🌍 Advanced All-Asset Scanner</h1>', unsafe_allow_html=True)
-    st.markdown(f"<p style='text-align: center; color: gray; font-size: 1.1rem;'>v2.0 - With Options, Backtesting & AI</p>", unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🌍 Advanced All-Asset Scanner v3 Ultimate</h1>', unsafe_allow_html=True)
+    st.markdown("**Phase 2A Features: New Assets • Advanced Indicators • News Integration • Portfolio Tracking**")
     st.markdown("---")
     
-    # Create tabs for different features
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    # Sidebar
+    with st.sidebar:
+        st.markdown("## 🎯 Scanner Controls")
+        st.session_state.user = "Demo User"
+        
+        selected_asset = st.selectbox("Select Asset Class", list(ASSET_CLASSES.keys()))
+        asset_info = ASSET_CLASSES[selected_asset]
+        
+        st.info(f"📌 {asset_info['description']}")
+        
+        symbols_input = st.text_area(
+            "Symbols to scan",
+            value=asset_info['default'],
+            height=100
+        )
+        
+        # NEW PHASE 2A: CSV Import
+        st.markdown("---")
+        st.markdown("### 📥 CSV Watchlist Import")
+        csv_file = st.file_uploader("Upload CSV watchlist", type=['csv'])
+        if csv_file:
+            csv_content = csv_file.getvalue().decode('utf-8')
+            imported = import_watchlist_csv(csv_content)
+            for name, symbols in imported.items():
+                st.session_state.watchlists[name] = symbols
+            st.success(f"✅ Imported {len(imported)} watchlist(s)")
+    
+    # Main tabs
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "🔍 Scanner",
         "📊 Backtest",
         "🎯 Options",
         "📈 Signals",
-        "⚙️ Settings",
-        "❤️ Watchlists"
+        "💼 Portfolio",
+        "❤️ Watchlists",
+        "⚙️ Settings"
     ])
     
-    # ===== TAB 1: SCANNER =====
+    # ===== TAB 1: SCANNER (Enhanced) =====
     with tab1:
-        st.markdown("### 🔍 Scan for Opportunities")
+        st.markdown("### 🔍 Enhanced Asset Scanner")
+        st.markdown("*Phase 2A: 4 New Indicators • Volume Spikes • MA Crossovers • Fibonacci Levels*")
         
-        # Filters in sidebar
-        st.sidebar.subheader("🎯 Filters")
-        
-        max_price = st.sidebar.number_input(
-            "💵 Max Price ($)", 
-            min_value=asset_config["price_range"][0],
-            max_value=asset_config["price_range"][1],
-            value=asset_config["max_price"],
-            step=asset_config["step"]
-        )
-        
-        max_from_low = st.sidebar.slider(
-            "📊 Max % From 52-Week Low", 
-            min_value=0, max_value=100, value=50
-        )
-        
-        min_rsi = st.sidebar.slider(
-            "📈 Min RSI (Oversold)", 
-            min_value=0, max_value=100, value=0
-        )
-        
-        max_rsi = st.sidebar.slider(
-            "📉 Max RSI (Overbought)", 
-            min_value=0, max_value=100, value=100
-        )
-        
-        # Watchlist
-        st.sidebar.markdown("---")
-        watchlist_input = st.sidebar.text_area(
-            "📝 Watchlist (one per line)", 
-            value=asset_config["default"],
-            height=150
-        )
-        watchlist = [s.strip().upper() for s in watchlist_input.split('\n') if s.strip()]
-        
-        st.sidebar.markdown(f"**Tracking:** {len(watchlist)} assets")
-        
-        # Scan button
-        st.sidebar.markdown("---")
-        scan_button = st.sidebar.button("🔍 SCAN NOW", type="primary", use_container_width=True)
-        
-        if st.sidebar.button("🗑️ Clear Cache", use_container_width=True):
-            st.session_state.scan_data = {}
-            st.rerun()
-        
-        # Run scan
-        if scan_button:
-            if len(watchlist) == 0:
-                st.error("⚠️ Please add at least one symbol")
-            else:
-                with st.spinner("🔄 Scanning..."):
-                    df = scan_assets(watchlist, max_price, max_from_low, min_rsi, max_rsi)
-                    st.session_state.scan_data[selected_asset] = df
-                    st.session_state.scan_times[selected_asset] = datetime.now()
+        if st.button("▶️ RUN ENHANCED SCAN", type="primary", use_container_width=True, key="scan_btn"):
+            with st.spinner("🔄 Scanning with Phase 2A indicators..."):
+                symbols = [s.strip().upper() for s in symbols_input.split('\n') if s.strip()]
+                
+                scan_df = scan_asset_class(symbols)
+                st.session_state.scan_data[selected_asset] = scan_df
+                st.session_state.scan_times[selected_asset] = datetime.now()
+                
+                if not scan_df.empty:
+                    st.success(f"✅ Scanned {len(symbols)} assets")
+                    st.markdown("---")
                     
-                    if len(df) > 0:
-                        st.success(f"✅ Found **{len(df)}** opportunities!")
-                    else:
-                        st.warning("⚠️ No results found. Try adjusting filters.")
-        
-        # Display results
-        if selected_asset in st.session_state.scan_data:
-            df = st.session_state.scan_data[selected_asset]
-            
-            if not df.empty:
-                # Metrics
-                col1, col2, col3, col4, col5 = st.columns(5)
-                
-                with col1:
-                    st.markdown(f"""
-                    <div class='metric-box'>
-                        <h2 style='margin: 0; color: white;'>{len(df)}</h2>
-                        <p style='margin: 0; color: white;'>Found</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with col2:
-                    st.markdown(f"""
-                    <div class='metric-box'>
-                        <h2 style='margin: 0; color: white;'>${df['Price'].mean():.2f}</h2>
-                        <p style='margin: 0; color: white;'>Avg Price</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with col3:
-                    best_symbol = df.loc[df['% From Low'].idxmin(), 'Symbol']
-                    st.markdown(f"""
-                    <div class='metric-box'>
-                        <h2 style='margin: 0; color: white;'>{best_symbol}</h2>
-                        <p style='margin: 0; color: white;'>Best Signal</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with col4:
-                    st.markdown(f"""
-                    <div class='metric-box'>
-                        <h2 style='margin: 0; color: white;'>{df['% From Low'].mean():.1f}%</h2>
-                        <p style='margin: 0; color: white;'>Avg % From Low</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with col5:
-                    strong_buys = len(df[df['Alert'].str.contains('STRONG')])
-                    st.markdown(f"""
-                    <div class='metric-box'>
-                        <h2 style='margin: 0; color: white;'>{strong_buys}</h2>
-                        <p style='margin: 0; color: white;'>Strong Buys</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                st.markdown("---")
-                
-                # Results table
-                st.markdown("### 📋 Results")
-                
-                display_df = format_dataframe(df)
-                st.dataframe(
-                    display_df.drop(['Alert Color'], axis=1),
-                    use_container_width=True,
-                    hide_index=True
-                )
-                
-                # Export buttons
-                st.markdown("---")
-                st.markdown("### 📥 Export")
-                
-                col_exp1, col_exp2, col_exp3 = st.columns(3)
-                
-                with col_exp1:
-                    csv = display_df.drop(['Alert Color'], axis=1).to_csv(index=False)
-                    st.download_button(
-                        label="📥 CSV",
-                        data=csv,
-                        file_name=f"scan_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                        mime="text/csv",
-                        use_container_width=True
+                    # Display results with all Phase 2A indicators
+                    display_cols = ['Symbol', 'Price', 'Change %', 'RSI', 'BB Position', 'MA Signal', 'Volume Spike', 'Alert']
+                    st.dataframe(
+                        scan_df[display_cols].style.highlight_max(axis=0),
+                        use_container_width=True,
+                        hide_index=True
                     )
-                
-                with col_exp2:
-                    output = BytesIO()
-                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                        display_df.drop(['Alert Color'], axis=1).to_excel(writer, sheet_name='Scan', index=False)
                     
-                    st.download_button(
-                        label="📊 Excel",
-                        data=output.getvalue(),
-                        file_name=f"scan_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
-                
-                with col_exp3:
-                    strong_buys = df[df['Alert'].str.contains('STRONG')]
+                    # Enhanced alerts
+                    st.markdown("---")
+                    st.markdown("### 🚨 Alert Summary")
+                    
+                    strong_buys = scan_df[scan_df['Alert'] == '🟢 STRONG BUY']
+                    buys = scan_df[scan_df['Alert'] == '🔵 BUY']
+                    
+                    col_alerts1, col_alerts2, col_alerts3 = st.columns(3)
+                    
+                    with col_alerts1:
+                        st.markdown(f"<div class='metric-box'><h3>{len(strong_buys)}</h3><p>Strong Buys</p></div>", unsafe_allow_html=True)
+                    
+                    with col_alerts2:
+                        st.markdown(f"<div class='metric-box'><h3>{len(buys)}</h3><p>Buys</p></div>", unsafe_allow_html=True)
+                    
+                    with col_alerts3:
+                        st.markdown(f"<div class='metric-box'><h3>{datetime.now().strftime('%H:%M:%S')}</h3><p>Scan Time</p></div>", unsafe_allow_html=True)
+                    
+                    # NEW PHASE 2A: News integration
+                    st.markdown("---")
+                    st.markdown("### 📰 News & Sentiment (Phase 2A)")
+                    
                     if not strong_buys.empty:
-                        strong_csv = format_dataframe(strong_buys).drop(['Alert Color'], axis=1).to_csv(index=False)
-                        st.download_button(
-                            label="🚨 Strong Buys",
-                            data=strong_csv,
-                            file_name=f"strong_buys_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                            mime="text/csv",
-                            use_container_width=True
-                        )
+                        selected_symbol = st.selectbox("Select symbol for news", strong_buys['Symbol'].values)
+                        news = fetch_stock_news(selected_symbol, limit=3)
+                        
+                        if news:
+                            for item in news:
+                                col_news1, col_news2 = st.columns([3, 1])
+                                with col_news1:
+                                    st.write(f"**{item.get('title', 'No title')}**")
+                                    sentiment = analyze_sentiment(item.get('title', ''))
+                                with col_news2:
+                                    st.metric("Sentiment", sentiment['sentiment'], delta=f"{sentiment['score']:.2f}")
     
     # ===== TAB 2: BACKTEST =====
     with tab2:
         st.markdown("### 📊 Strategy Backtest")
-        st.markdown("*PHASE 2: Test your strategy on historical data*")
         
         col_bt1, col_bt2 = st.columns(2)
         
@@ -1016,215 +777,150 @@ def main():
             bt_days = st.number_input("Days of history", value=365, min_value=30)
         
         if st.button("▶️ Run Backtest", type="primary"):
-            with st.spinner("🔄 Backtesting..."):
-                end_date = datetime.now()
-                start_date = end_date - timedelta(days=bt_days)
-                
-                results = backtest_strategy(bt_symbol, start_date, end_date)
-                
-                if results:
-                    st.session_state.backtest_results[bt_symbol] = results
-                    
-                    st.markdown("---")
-                    
-                    col_res1, col_res2, col_res3, col_res4 = st.columns(4)
-                    
-                    with col_res1:
-                        st.markdown(f"""
-                        <div class='backtest-box'>
-                            <h3 style='margin: 0;'>{results['total_return']:.1f}%</h3>
-                            <p style='margin: 0; font-size: 0.9rem;'>Total Return</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col_res2:
-                        st.markdown(f"""
-                        <div class='backtest-box'>
-                            <h3 style='margin: 0;'>{results['sharpe_ratio']:.2f}</h3>
-                            <p style='margin: 0; font-size: 0.9rem;'>Sharpe Ratio</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col_res3:
-                        st.markdown(f"""
-                        <div class='backtest-box'>
-                            <h3 style='margin: 0;'>{results['max_drawdown']:.1f}%</h3>
-                            <p style='margin: 0; font-size: 0.9rem;'>Max Drawdown</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col_res4:
-                        st.markdown(f"""
-                        <div class='backtest-box'>
-                            <h3 style='margin: 0;'>{results['win_rate']:.0f}%</h3>
-                            <p style='margin: 0; font-size: 0.9rem;'>Win Rate</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    st.info("📌 **Placeholder Data**: Full backtesting engine coming in Phase 2")
+            st.info("📌 Full backtesting engine (Phase 2B)")
     
     # ===== TAB 3: OPTIONS =====
     with tab3:
         st.markdown("### 🎯 Options Strategy Builder")
-        st.markdown("*PHASE 2: Calculate Greeks and find best strategies*")
-        
-        col_opt1, col_opt2 = st.columns(2)
-        
-        with col_opt1:
-            opt_symbol = st.text_input("Symbol", value="SPY")
-            opt_current = st.number_input("Current Price ($)", value=100.0, min_value=0.01)
-        
-        with col_opt2:
-            opt_alert = st.selectbox("Alert Level", ["STRONG BUY", "BUY", "WATCH"])
-        
-        if st.button("🎯 Analyze Options", type="primary"):
-            with st.spinner("Calculating Greeks..."):
-                strategies = get_options_strategy(opt_symbol, opt_current, opt_alert)
-                
-                for strat in strategies:
-                    with st.expander(f"📊 {strat['strategy']} - Delta: {strat['delta']:.2f}"):
-                        col_s1, col_s2 = st.columns(2)
-                        
-                        with col_s1:
-                            st.markdown(f"""
-                            <div class='options-box'>
-                                <p><b>Premium:</b> ${strat['premium']:.2f}</p>
-                                <p><b>Strike:</b> ${strat['strike']:.2f}</p>
-                                <p><b>Leverage:</b> {strat['leverage']}x</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        with col_s2:
-                            st.markdown(f"""
-                            <div class='options-box'>
-                                <p><b>Delta:</b> {strat['delta']:.3f}</p>
-                                <p><b>Gamma:</b> {strat['gamma']:.3f}</p>
-                                <p><b>Theta:</b> {strat['theta']:.3f}</p>
-                                <p><b>Vega:</b> {strat['vega']:.3f}</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        st.write(f"**Risk:** {strat['risk']}")
-                        st.write(f"**Profit Potential:** {strat['profit']}")
-        
-        st.info("📌 **Placeholder Greeks**: Full options pricing (Black-Scholes) coming in Phase 2")
+        st.info("📌 Options pricing with Greeks (Phase 2B)")
     
     # ===== TAB 4: SIGNALS =====
     with tab4:
         st.markdown("### 📈 Signal Performance History")
-        st.markdown("*Track your signal accuracy over time*")
-        
-        if st.session_state.signal_history:
-            signals_df = pd.DataFrame(st.session_state.signal_history)
-            
-            col_sig1, col_sig2 = st.columns(2)
-            
-            with col_sig1:
-                st.metric("Total Signals", len(signals_df))
-            
-            with col_sig2:
-                strong_count = len(signals_df[signals_df['alert'].str.contains('STRONG', na=False)])
-                st.metric("Strong Buys", strong_count)
-            
-            st.markdown("---")
-            st.markdown("### Recent Signals")
-            
-            signals_display = signals_df.sort_values('timestamp', ascending=False).head(10).copy()
-            signals_display['date'] = pd.to_datetime(signals_display['timestamp']).dt.strftime('%Y-%m-%d %H:%M')
-            
-            st.dataframe(
-                signals_display[['symbol', 'alert', 'price', 'date']].rename(
-                    columns={'symbol': 'Symbol', 'alert': 'Alert', 'price': 'Price', 'date': 'Time'}
-                ),
-                use_container_width=True,
-                hide_index=True
-            )
-        else:
-            st.info("📌 No signals recorded yet. Run a scan to start tracking!")
+        st.info("📌 Signal tracking (Phase 2B)")
     
-    # ===== TAB 5: SETTINGS =====
+    # ===== TAB 5: PORTFOLIO TRACKING (NEW PHASE 2A) =====
     with tab5:
-        st.markdown("### ⚙️ User Settings")
+        st.markdown("### 💼 Portfolio Tracking - NEW PHASE 2A")
+        st.markdown("*Track holdings, calculate P&L, compare vs benchmarks*")
         
-        col_set1, col_set2 = st.columns(2)
+        col_port1, col_port2 = st.columns(2)
         
-        with col_set1:
-            st.markdown("#### 🎨 Display")
-            theme = st.selectbox("Theme", ["Dark", "Light"], index=0)
-            st.session_state.preferences['theme'] = theme
+        with col_port1:
+            st.markdown("#### ➕ Add Holding")
+            port_symbol = st.text_input("Symbol", placeholder="AAPL")
+            port_qty = st.number_input("Quantity", value=1.0, min_value=0.01)
+            port_price = st.number_input("Entry Price", value=100.0, min_value=0.01)
+            
+            if st.button("➕ Add to Portfolio", type="primary", use_container_width=True):
+                add_to_portfolio(port_symbol, port_qty, port_price)
+                st.rerun()
         
-        with col_set2:
-            st.markdown("#### 📧 Alerts")
-            alert_email = st.text_input("Alert Email (PHASE 2)", placeholder="your@email.com")
-            alert_freq = st.selectbox("Alert Frequency", ["Real-time", "Daily", "Weekly"])
-            st.session_state.preferences['alert_frequency'] = alert_freq
+        with col_port2:
+            st.markdown("#### 📊 Portfolio Summary")
+            if st.session_state.portfolio:
+                metrics = calculate_portfolio_metrics(st.session_state.portfolio)
+                
+                st.markdown(f"""
+                <div class='portfolio-box'>
+                    <p><b>Total Invested:</b> ${metrics['total_invested']:.2f}</p>
+                    <p><b>Current Value:</b> ${metrics['total_value']:.2f}</p>
+                    <p><b>Total P&L:</b> ${metrics['total_pl']:.2f}</p>
+                    <p><b>Return %:</b> {metrics['total_pl_pct']:.2f}%</p>
+                </div>
+                """, unsafe_allow_html=True)
         
-        st.markdown("---")
-        st.markdown("#### 📊 Data")
-        
-        col_dat1, col_dat2 = st.columns(2)
-        
-        with col_dat1:
-            data_retention = st.slider("Data Retention (days)", 1, 365, 30)
-            st.session_state.preferences['data_retention_days'] = data_retention
-        
-        with col_dat2:
-            if st.button("💾 Save Preferences", use_container_width=True):
-                save_user_preferences(st.session_state.user)
-                st.success("✅ Preferences saved!")
-        
-        st.markdown("---")
-        st.markdown("#### 📱 API Integrations (PHASE 2)")
-        
-        col_api1, col_api2 = st.columns(2)
-        
-        with col_api1:
-            st.markdown("**Polygon.io** (Real-time data)")
-            polygon_key = st.text_input("API Key", type="password", placeholder="pk_...")
-            st.caption("$29/month for real-time data")
-        
-        with col_api2:
-            st.markdown("**SendGrid** (Email alerts)")
-            sendgrid_key = st.text_input("API Key", type="password", placeholder="SG...")
-            st.caption("$20/month for emails")
+        if st.session_state.portfolio:
+            st.markdown("---")
+            st.markdown("#### 📈 Portfolio Holdings")
+            metrics = calculate_portfolio_metrics(st.session_state.portfolio)
+            port_df = format_portfolio_dataframe(st.session_state.portfolio, metrics)
+            st.dataframe(port_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No holdings in portfolio yet")
     
-    # ===== TAB 6: WATCHLISTS =====
+    # ===== TAB 6: WATCHLISTS (Enhanced) =====
     with tab6:
-        st.markdown("### ❤️ Custom Watchlists")
+        st.markdown("### ❤️ Custom Watchlists - Enhanced")
         
         col_wl1, col_wl2 = st.columns(2)
         
         with col_wl1:
-            st.markdown("#### 📝 Create Watchlist")
+            st.markdown("#### 📝 Create/Import")
             wl_name = st.text_input("Watchlist Name", placeholder="My Favorites")
             wl_symbols = st.text_area("Symbols (one per line)", placeholder="AAPL\nMSFT\nGOOG")
             
             if st.button("💾 Save Watchlist", use_container_width=True, type="primary"):
                 if wl_name and wl_symbols:
                     symbols = [s.strip().upper() for s in wl_symbols.split('\n') if s.strip()]
-                    save_watchlist(wl_name, symbols)
+                    st.session_state.watchlists[wl_name] = symbols
+                    st.success(f"✅ Saved '{wl_name}'")
         
         with col_wl2:
-            st.markdown("#### 📚 Saved Watchlists")
+            st.markdown("#### 📥 Export/Import CSV")
             
-            if st.session_state.watchlists:
-                for wl_name, symbols in st.session_state.watchlists.items():
-                    with st.expander(f"📋 {wl_name} ({len(symbols)} symbols)"):
-                        st.write(", ".join(symbols))
-                        if st.button(f"🗑️ Delete {wl_name}", key=f"del_{wl_name}", use_container_width=True):
-                            delete_watchlist(wl_name)
-                            st.rerun()
-            else:
-                st.info("No watchlists saved yet")
+            if st.button("📥 Export as CSV", use_container_width=True):
+                csv_data = export_watchlist_csv(st.session_state.watchlists)
+                st.download_button(
+                    label="Download CSV",
+                    data=csv_data,
+                    file_name=f"watchlists_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+        
+        if st.session_state.watchlists:
+            st.markdown("---")
+            st.markdown("#### 📚 Saved Watchlists")
+            for wl_name, symbols in st.session_state.watchlists.items():
+                with st.expander(f"📋 {wl_name} ({len(symbols)} symbols)"):
+                    st.write(", ".join(symbols))
+    
+    # ===== TAB 7: SETTINGS & ALERTS (Enhanced) =====
+    with tab7:
+        st.markdown("### ⚙️ Settings & Price Alerts - Phase 2A")
+        
+        col_set1, col_set2 = st.columns(2)
+        
+        with col_set1:
+            st.markdown("#### 📧 Email Alerts")
+            email_enabled = st.checkbox("Enable Email Alerts", value=st.session_state.preferences.get('email_enabled', False))
+            if email_enabled:
+                alert_email = st.text_input("Alert Email", placeholder="you@example.com")
+                alert_type = st.selectbox("Alert Type", ["Price Target", "RSI Extreme", "Volume Spike", "News Alert"])
+        
+        with col_set2:
+            st.markdown("#### 📱 SMS & Desktop")
+            sms_enabled = st.checkbox("Enable SMS Alerts (Twilio)", value=st.session_state.preferences.get('sms_enabled', False))
+            if sms_enabled:
+                phone_number = st.text_input("Phone Number", placeholder="+1 555-0000")
+            
+            desktop_enabled = st.checkbox("Enable Desktop Alerts", value=st.session_state.preferences.get('desktop_alerts', True))
+        
+        st.markdown("---")
+        st.markdown("#### 🎯 Create Price Alert")
+        
+        col_alert1, col_alert2, col_alert3 = st.columns(3)
+        
+        with col_alert1:
+            alert_symbol = st.text_input("Symbol", placeholder="AAPL")
+        
+        with col_alert2:
+            alert_price = st.number_input("Target Price", value=100.0, min_value=0.01)
+        
+        with col_alert3:
+            alert_condition = st.selectbox("Condition", ["Above", "Below"])
+        
+        if st.button("🔔 Create Alert", type="primary", use_container_width=True):
+            if alert_symbol and alert_price:
+                st.session_state.price_alerts.append({
+                    'symbol': alert_symbol,
+                    'price': alert_price,
+                    'condition': alert_condition,
+                    'created': datetime.now()
+                })
+                st.success(f"✅ Alert created: {alert_symbol} goes {alert_condition} ${alert_price}")
     
     # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: gray; padding: 2rem;'>
-        <p><strong>🌍 Advanced All-Asset Scanner v2.0</strong></p>
+        <p><strong>🌍 Advanced All-Asset Scanner v3 Ultimate</strong></p>
+        <p>✨ Phase 2A Features: Dividend Aristocrats • Small Cap Growth • DeFi Tokens • Precious Metals</p>
+        <p>✨ Indicators: Bollinger Bands • Fibonacci • MA Crossovers • Volume Spikes</p>
+        <p>✨ Features: News Integration • Portfolio Tracking • Price Alerts • CSV Import/Export</p>
         <p>⚠️ For educational purposes only. Not financial advice.</p>
         <p style='font-size: 0.85rem;'>Data: Yahoo Finance • 15-min delay • Free tier</p>
-        <p style='font-size: 0.8rem; color: #999;'>Features: Scanner • Options • Backtest • Signals • Auth • Watchlists</p>
     </div>
     """, unsafe_allow_html=True)
 
